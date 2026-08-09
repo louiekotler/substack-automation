@@ -1,0 +1,7 @@
+{{photos}}
+
+{{spacer}}
+
+{{spacer}}
+
+{{signoff}}

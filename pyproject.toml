@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "substack-post"
+version = "1.0.0"
+description = "Publish a folder of photos to Substack as a single post, in timestamp order with date captions."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Louie Kotler" }]
+keywords = ["substack", "photos", "publishing", "exif", "automation"]
+
+dependencies = [
+    "python-substack>=0.2.0",
+    "Pillow>=10.0",
+    "pillow-heif>=0.16",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "piexif>=1.1"]
+
+[project.scripts]
+substack-post = "substack_post.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/substack_post"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
