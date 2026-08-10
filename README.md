@@ -25,12 +25,16 @@ Built on [python-substack](https://github.com/ma2za/python-substack).
    fields, not the body) and creates a draft.
 5. With `--publish`, publishes it. Otherwise it stops at a draft.
 6. Prints the resulting URL.
+7. Optionally (`--notify`, publish only), texts a personal contact list via
+   macOS Messages to let them know the post is up.
 
 ## Requirements
 
 - Python 3.10+
 - A Substack publication you can post to
 - Password sign-in enabled on your Substack account (see [Setup](#setup))
+- For `--notify`: macOS, with Messages signed in (see
+  [Notify contacts on publish](#notify-contacts-on-publish))
 
 ## Setup
 
@@ -119,6 +123,8 @@ because publishing can't be undone. `--yes` skips the prompt.
 | `--env-file` | Path to a `.env` file (default: `.env` in the current directory). |
 | `--dry-run` | Render and print the post; no uploads, no Substack calls. |
 | `--yes` | Skip the confirmation prompt before publishing. |
+| `--notify` | After publishing, text everyone in the contacts file via macOS Messages. Requires `--publish`. |
+| `--notify-list` | Path to the notify contacts JSON file (default: `NOTIFY_CONTACTS_FILE` from `.env`, or `notify_contacts.json`). |
 
 ## Ordering and captions
 
@@ -150,10 +156,82 @@ the post body.
 Pass `--template path/to/file.md` to use a different template — it must
 contain a `{{photos}}` placeholder to be useful.
 
+## Notify contacts on publish
+
+With `--publish --notify`, once the post is live it texts a personal contact
+list via the macOS Messages app, so you don't have to separately let people
+know. It only ever fires after an actual publish — never for a draft.
+
+Create your contact list from the example:
+
+```bash
+cp notify_contacts.example.json notify_contacts.json
+```
+
+```json
+[
+  {"name": "Mom", "phone": "+15551234567"},
+  {"name": "Dad", "phone": "+15559876543"},
+  {"name": "Family", "chat_name": "Family Group Chat Name"}
+]
+```
+
+Each entry is a person (`phone`) or an existing group conversation
+(`chat_name`) — never both. `name` is never looked up against your macOS
+Contacts — it's just what this tool uses to personalize the message (see
+below) and to label the confirmation prompt and send results.
+
+- **People:** `phone` is passed straight to Messages as the recipient's
+  iMessage handle, so despite the field name it can just as well be an
+  iCloud email address (`"phone": "mom@icloud.com"`) — whatever that person
+  actually has registered with iMessage. Use [E.164
+  format](https://en.wikipedia.org/wiki/E.164) (`+1` followed by the full
+  number, no spaces or dashes) for phone numbers, for reliable matching.
+- **Groups:** `chat_name` must match the group conversation's display name
+  *exactly* as it appears in Messages. Unnamed groups (Messages just lists
+  participants) can't be matched this way — open the conversation in
+  Messages and give it a name first.
+
+`notify_contacts.json` is gitignored — like `.env`, it holds personal data
+and should never be committed.
+
+By default the tool looks for `notify_contacts.json` in the current
+directory. Override the location either per-run with `--notify-list
+path/to/file.json`, or persistently by setting `NOTIFY_CONTACTS_FILE` in
+`.env`.
+
+The message itself comes from
+[`src/substack_post/templates/notify_message.md`](src/substack_post/templates/notify_message.md),
+rendered separately for each contact:
+
+```markdown
+Hi {{name}}, I have made a new Substack post: {{title}}
+
+{{link}}
+```
+
+Edit that file to change the wording; `{{name}}`, `{{title}}`, and `{{link}}`
+are filled in automatically per recipient. Before anything is sent, the usual
+publish confirmation prompt (see [Usage](#usage)) grows a `Notify:` line
+showing who will be texted and an example of the personalized message, so you
+see it before it goes out — `--yes` skips this the same way it skips the rest
+of the prompt.
+
+> [!IMPORTANT]
+> The first time you run `--notify`, macOS will prompt you to grant your
+> terminal app **Automation** permission to control Messages — approve it, or
+> texts won't send. You can review this later under **System Settings →
+> Privacy & Security → Automation**.
+
+If a particular text fails to send (a bad number, or a contact not reachable
+via iMessage), it's reported as `FAILED <name>: <reason>` and the rest of the
+list still gets sent — one bad number doesn't block everyone else, and it
+never un-publishes the post, which has already gone out by that point.
+
 ## Sample output
 
 ```
-$ substack-post ./photos --title "Olympic Peninsula" --subtitle "August 2026" --publish
+$ substack-post ./photos --title "Olympic Peninsula" --subtitle "August 2026" --publish --notify
 Found 14 photo(s) in ./photos:
   - IMG_0401.HEIC (2026-08-02 09:14)
   - IMG_0402.HEIC (2026-08-02 09:16)
@@ -168,11 +246,19 @@ About to publish:
   Photos:      14
   Publication: https://yourpub.substack.com
   Email:       yes, all subscribers
+  Notify:      2 people via Messages (Mom, Dad)
+               each gets a personalized message, e.g. for Mom:
+               "Hi Mom, I have made a new Substack post: Olympic Peninsula
+
+               https://yourpub.substack.com/p/olympic-peninsula"
 
 Publish? [y/N] y
 Publishing...
 Published:
 https://yourpub.substack.com/p/olympic-peninsula
+Notifying...
+  ok Mom
+  ok Dad
 ```
 
 ## Troubleshooting
@@ -188,6 +274,17 @@ https://yourpub.substack.com/p/olympic-peninsula
 - **HEIC photos fail to open.** Make sure `pillow-heif` installed correctly
   (`pip install -e .` should handle this); it's what lets Pillow read HEIC
   files at all.
+- **A `--notify` text fails to send.** Most often either the terminal app
+  hasn't been granted Automation permission for Messages yet (**System
+  Settings → Privacy & Security → Automation**), a phone number isn't in
+  E.164 format, or that contact's phone/email isn't reachable via iMessage.
+  The failure is reported per-contact and doesn't affect the rest of the list
+  or the post, which is already published by that point.
+- **A `--notify` group message fails with "Invalid index" or "can't get
+  chat."** The `chat_name` doesn't exactly match an existing group
+  conversation's display name in Messages. Open the group in Messages,
+  confirm (or set) its name there, and match it exactly, including case and
+  punctuation.
 
 ## Running tests
 

@@ -1,6 +1,7 @@
-# Credentials
+# Credentials and personal data
 .env
 cookies.json
+notify_contacts.json
 
 # Virtual environments
 .venv/

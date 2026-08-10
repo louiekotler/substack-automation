@@ -50,3 +50,19 @@ def load_credentials(env_file: Path | None = None) -> Credentials:
         )
 
     return Credentials(**values)
+
+
+DEFAULT_NOTIFY_CONTACTS_FILENAME = "notify_contacts.json"
+
+
+def resolve_notify_contacts_path(cli_path: Path | None = None) -> Path:
+    """Where to find the notify contacts file: --notify-list, then
+    NOTIFY_CONTACTS_FILE (from .env), then the default filename in the
+    current directory. Call after load_credentials() so .env is loaded.
+    """
+    if cli_path is not None:
+        return cli_path.expanduser()
+    env_value = os.environ.get("NOTIFY_CONTACTS_FILE")
+    if env_value:
+        return Path(env_value).expanduser()
+    return Path(DEFAULT_NOTIFY_CONTACTS_FILENAME)

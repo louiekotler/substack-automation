@@ -21,6 +21,10 @@ def default_signoff() -> str:
     return _read_package_template("signoff.md").strip()
 
 
+def default_notify_message_template() -> str:
+    return _read_package_template("notify_message.md")
+
+
 def _read_package_template(name: str) -> str:
     return (
         importlib.resources.files("substack_post.templates").joinpath(name).read_text()
