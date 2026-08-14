@@ -111,8 +111,8 @@ because publishing can't be undone. `--yes` skips the prompt.
 
 | Flag | Description |
 | --- | --- |
-| `photo_dir` | Folder of photos to post (required, positional). |
-| `--title` | Post title (required). |
+| `photo_dir` | Folder of photos to post (positional; required unless `--check`). |
+| `--title` | Post title (required unless `--check`). |
 | `--subtitle` | Post subtitle (optional). |
 | `--publish` | Publish instead of leaving a draft. |
 | `--draft` | Create a draft only (the default; exists for clarity). |
@@ -125,6 +125,49 @@ because publishing can't be undone. `--yes` skips the prompt.
 | `--yes` | Skip the confirmation prompt before publishing. |
 | `--notify` | After publishing, text everyone in the contacts file via macOS Messages. Requires `--publish`. |
 | `--notify-list` | Path to the notify contacts JSON file (default: `NOTIFY_CONTACTS_FILE` from `.env`, or `notify_contacts.json`). |
+| `--check` | Sign in, report the publication, and exit without posting. `photo_dir` and `--title` aren't needed. |
+| `--format` | `text` (default), `kv`, or `json` — see [Machine-readable output](#machine-readable-output). |
+
+## Checking your setup
+
+```bash
+substack-post --check
+```
+
+Loads `.env`, signs in, and prints who you are and which publication you'd be
+posting to. Nothing is uploaded, drafted, or published. This is the quickest way
+to tell a wrong password from a wrong publication URL, and it's what the
+Lightroom plug-in's **Test** button calls.
+
+## Machine-readable output
+
+`--format kv` prints one `key=value` line per field on stdout, and `--format
+json` prints the same fields as one object. Progress notes stay on stderr either
+way, so stdout holds nothing but the result.
+
+```bash
+$ substack-post ./photos --title "Olympic Peninsula" --format kv
+status=draft
+url=https://yourpub.substack.com/publish/post/12345
+draft_id=12345
+slug=
+photos=14
+emailed=0
+notified_ok=0
+notified_failed=0
+```
+
+`status` is `draft`, `published`, `dry_run`, or `aborted`. Every key is always
+present, so a caller never has to branch on which fields exist. Booleans are
+`1`/`0` and unknown values are empty.
+
+The `kv` form exists for callers without a JSON parser — it's what the companion
+Lightroom plug-in (`lightroom-substack-publisher`) uses, which keeps a
+third-party Lua JSON library out of that plug-in's bundle.
+
+On failure the tool exits non-zero and prints `error: <message>` to stderr.
+Exit codes: `1` if Substack rejected something, `2` for bad input or
+configuration, `130` if interrupted.
 
 ## Ordering and captions
 

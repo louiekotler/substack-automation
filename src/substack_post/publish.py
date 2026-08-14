@@ -22,6 +22,25 @@ def login(email: str, password: str, publication_url: str) -> Api:
         raise PublishError(f"Could not sign in to Substack: {exc}") from exc
 
 
+def whoami(api: Api) -> dict:
+    """Confirm the session actually works, and say who it belongs to.
+
+    Constructing the Api signs in, but only a real request proves the resulting
+    session is usable — which is the whole point of a configuration check.
+    """
+    try:
+        user_id = api.get_user_id()
+    except Exception as exc:  # noqa: BLE001
+        raise PublishError(f"Signed in, but Substack rejected a request: {exc}") from exc
+
+    name = ""
+    try:
+        name = (api.get_user_profile() or {}).get("name") or ""
+    except Exception:  # noqa: BLE001 - cosmetic; the user id already proved the session
+        pass
+    return {"user_id": user_id, "user": name}
+
+
 def upload_photos(
     api: Api, photos: list[Photo], workdir: Path
 ) -> list[tuple[Photo, str]]:

@@ -31,6 +31,10 @@ _VAR_ALIASES = {
 
 
 def load_credentials(env_file: Path | None = None) -> Credentials:
+    # A named file that isn't there is a typo, not an invitation to fall back
+    # to the environment and then complain about missing settings.
+    if env_file is not None and not env_file.expanduser().is_file():
+        raise ConfigError(f"No such env file: {env_file}")
     load_dotenv(dotenv_path=env_file)
 
     values = {}

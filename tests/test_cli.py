@@ -1,0 +1,121 @@
+"""CLI argument handling and machine-readable output.
+
+Nothing here contacts Substack: the tests cover argument validation and the
+shape of the result the Lightroom plug-in parses.
+"""
+
+import json
+
+import pytest
+from PIL import Image
+
+from substack_post.cli import _emit, _result, build_parser, run
+
+
+def _jpeg(path, size=(8, 8)) -> None:
+    Image.new("RGB", size, "white").save(path, format="JPEG")
+
+
+@pytest.fixture
+def photo_dir(tmp_path):
+    directory = tmp_path / "photos"
+    directory.mkdir()
+    _jpeg(directory / "a.jpg")
+    _jpeg(directory / "b.jpg")
+    return directory
+
+
+def test_result_has_every_key_whatever_the_outcome() -> None:
+    keys = set(_result("draft")) | set(_result("published", url="u", emailed=True))
+    assert keys == {
+        "status", "url", "draft_id", "slug", "photos", "emailed",
+        "notified_ok", "notified_failed",
+    }
+
+
+def test_emit_kv_writes_one_line_per_key(capsys) -> None:
+    _emit(_result("draft", url="https://x.test/p/1", draft_id=7, photos=3), "kv")
+    lines = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+    assert lines["status"] == "draft"
+    assert lines["url"] == "https://x.test/p/1"
+    assert lines["draft_id"] == "7"
+    assert lines["photos"] == "3"
+
+
+def test_emit_kv_renders_booleans_and_none_for_a_parserless_caller(capsys) -> None:
+    _emit({"emailed": True, "notify": False, "slug": None}, "kv")
+    assert capsys.readouterr().out == "emailed=1\nnotify=0\nslug=\n"
+
+
+def test_emit_json_round_trips(capsys) -> None:
+    _emit(_result("published", url="https://x.test/p/1", emailed=True), "json")
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "published"
+    assert payload["emailed"] is True
+
+
+def test_format_defaults_to_text() -> None:
+    args = build_parser().parse_args(["photos", "--title", "T"])
+    assert args.format == "text"
+
+
+def test_check_needs_no_photo_dir_or_title() -> None:
+    args = build_parser().parse_args(["--check"])
+    assert args.check and args.photo_dir is None and args.title is None
+
+
+def test_photo_dir_is_still_required_without_check(capsys) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        run(["--title", "T"])
+    assert exit_info.value.code == 2
+    assert "photo_dir" in capsys.readouterr().err
+
+
+def test_title_is_still_required_without_check(capsys) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        run(["photos"])
+    assert exit_info.value.code == 2
+    assert "--title" in capsys.readouterr().err
+
+
+def test_dry_run_kv_reports_the_photo_count_and_nothing_else_on_stdout(
+    photo_dir, capsys
+) -> None:
+    assert run([str(photo_dir), "--title", "T", "--dry-run", "--format", "kv"]) == 0
+    captured = capsys.readouterr()
+    assert dict(l.split("=", 1) for l in captured.out.splitlines()) == {
+        "status": "dry_run", "url": "", "draft_id": "", "slug": "",
+        "photos": "2", "emailed": "0", "notified_ok": "0", "notified_failed": "0",
+    }
+    # The preview itself is still available, just out of the result's way.
+    assert "dry run: rendered markdown" in captured.err
+
+
+def test_dry_run_text_output_is_unchanged(photo_dir, capsys) -> None:
+    assert run([str(photo_dir), "--title", "T", "--dry-run"]) == 0
+    assert "dry run: rendered markdown" in capsys.readouterr().out
+
+
+def test_missing_photo_folder_reports_an_error_line(tmp_path, capsys) -> None:
+    assert run([str(tmp_path / "nope"), "--title", "T", "--dry-run"]) == 2
+    assert capsys.readouterr().err.startswith("error: ")
+
+
+def test_unreadable_template_reports_an_error_line(photo_dir, tmp_path, capsys) -> None:
+    missing = tmp_path / "missing.md"
+    code = run([str(photo_dir), "--title", "T", "--dry-run", "--template", str(missing)])
+    assert code == 2
+    assert capsys.readouterr().err.startswith("error: ")
+
+
+def test_notify_still_requires_publish(photo_dir, capsys) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        run([str(photo_dir), "--title", "T", "--notify"])
+    assert exit_info.value.code == 2
+    assert "--notify requires --publish" in capsys.readouterr().err
+
+
+def test_named_env_file_that_is_missing_says_so(photo_dir, tmp_path, capsys) -> None:
+    code = run([str(photo_dir), "--title", "T", "--env-file", str(tmp_path / "nope.env")])
+    assert code == 2
+    assert "No such env file" in capsys.readouterr().err
