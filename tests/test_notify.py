@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from substack_post import notify
+from substack_post.config import resolve_notify_contacts_path
 from substack_post.notify import (
     Contact,
     NotifyError,
@@ -147,3 +148,35 @@ def test_notify_all_continues_after_one_failure(monkeypatch) -> None:
     contacts = [Contact(name="Bad", phone="+1"), ]
     results = notify_all([(contacts[0], "msg")])
     assert results == [(contacts[0], "boom")]
+
+
+class TestResolveNotifyContactsPath:
+    """Where the contacts file is looked for, and in what order."""
+
+    def test_cli_path_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NOTIFY_CONTACTS_FILE", str(tmp_path / "from-env.json"))
+        chosen = resolve_notify_contacts_path(tmp_path / "explicit.json", tmp_path / ".env")
+        assert chosen == tmp_path / "explicit.json"
+
+    def test_env_var_beats_the_file_beside_the_env_file(self, tmp_path, monkeypatch):
+        (tmp_path / "notify_contacts.json").write_text("[]")
+        monkeypatch.setenv("NOTIFY_CONTACTS_FILE", str(tmp_path / "from-env.json"))
+        chosen = resolve_notify_contacts_path(None, tmp_path / ".env")
+        assert chosen == tmp_path / "from-env.json"
+
+    def test_falls_back_to_the_file_beside_a_named_env_file(self, tmp_path, monkeypatch):
+        """A GUI-launched run has an arbitrary working directory, so a bare
+        filename is meaningless; the env file it names is the only anchor."""
+        monkeypatch.delenv("NOTIFY_CONTACTS_FILE", raising=False)
+        beside = tmp_path / "notify_contacts.json"
+        beside.write_text("[]")
+        assert resolve_notify_contacts_path(None, tmp_path / ".env") == beside
+
+    def test_ignores_a_neighbour_that_is_not_there(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("NOTIFY_CONTACTS_FILE", raising=False)
+        chosen = resolve_notify_contacts_path(None, tmp_path / ".env")
+        assert chosen == Path("notify_contacts.json")
+
+    def test_without_an_env_file_the_old_default_stands(self, monkeypatch):
+        monkeypatch.delenv("NOTIFY_CONTACTS_FILE", raising=False)
+        assert resolve_notify_contacts_path() == Path("notify_contacts.json")

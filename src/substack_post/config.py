@@ -59,14 +59,26 @@ def load_credentials(env_file: Path | None = None) -> Credentials:
 DEFAULT_NOTIFY_CONTACTS_FILENAME = "notify_contacts.json"
 
 
-def resolve_notify_contacts_path(cli_path: Path | None = None) -> Path:
+def resolve_notify_contacts_path(
+    cli_path: Path | None = None, env_file: Path | None = None
+) -> Path:
     """Where to find the notify contacts file: --notify-list, then
-    NOTIFY_CONTACTS_FILE (from .env), then the default filename in the
-    current directory. Call after load_credentials() so .env is loaded.
+    NOTIFY_CONTACTS_FILE (from .env), then the default filename beside a named
+    --env-file, then in the current directory. Call after load_credentials()
+    so .env is loaded.
+
+    The step before last is for callers launched by something else: a GUI gives
+    its subprocess an arbitrary working directory, so a bare filename resolves
+    somewhere meaningless. Such a caller names the env file explicitly, and the
+    contacts file conventionally sits beside it.
     """
     if cli_path is not None:
         return cli_path.expanduser()
     env_value = os.environ.get("NOTIFY_CONTACTS_FILE")
     if env_value:
         return Path(env_value).expanduser()
+    if env_file is not None:
+        beside = env_file.expanduser().parent / DEFAULT_NOTIFY_CONTACTS_FILENAME
+        if beside.is_file():
+            return beside
     return Path(DEFAULT_NOTIFY_CONTACTS_FILENAME)

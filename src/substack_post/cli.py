@@ -272,7 +272,9 @@ def run(argv: list[str] | None = None) -> int:
     if args.notify:
         try:
             notify.check_platform()
-            contacts_path = resolve_notify_contacts_path(args.notify_list)
+            contacts_path = resolve_notify_contacts_path(
+                args.notify_list, args.env_file
+            )
             notify_contacts = notify.load_contacts(contacts_path)
         except NotifyError as exc:
             print(f"error: {exc}", file=sys.stderr)

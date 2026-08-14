@@ -124,7 +124,7 @@ because publishing can't be undone. `--yes` skips the prompt.
 | `--dry-run` | Render and print the post; no uploads, no Substack calls. |
 | `--yes` | Skip the confirmation prompt before publishing. |
 | `--notify` | After publishing, text everyone in the contacts file via macOS Messages. Requires `--publish`. |
-| `--notify-list` | Path to the notify contacts JSON file (default: `NOTIFY_CONTACTS_FILE` from `.env`, or `notify_contacts.json`). |
+| `--notify-list` | Path to the notify contacts JSON file. See [Notify contacts on publish](#notify-contacts-on-publish) for where it's looked for by default. |
 | `--check` | Sign in, report the publication, and exit without posting. `photo_dir` and `--title` aren't needed. |
 | `--format` | `text` (default), `kv`, or `json` — see [Machine-readable output](#machine-readable-output). |
 
@@ -238,10 +238,17 @@ below) and to label the confirmation prompt and send results.
 `notify_contacts.json` is gitignored — like `.env`, it holds personal data
 and should never be committed.
 
-By default the tool looks for `notify_contacts.json` in the current
-directory. Override the location either per-run with `--notify-list
-path/to/file.json`, or persistently by setting `NOTIFY_CONTACTS_FILE` in
-`.env`.
+The contacts file is looked for in this order:
+
+1. `--notify-list path/to/file.json`
+2. `NOTIFY_CONTACTS_FILE` in `.env`
+3. `notify_contacts.json` sitting beside the `--env-file` you named
+4. `notify_contacts.json` in the current directory
+
+Step 3 exists for callers that don't control their working directory — a GUI
+hands its subprocess an arbitrary one, so a bare filename would resolve
+somewhere meaningless. Such a caller names the `.env` explicitly, and keeping
+the contacts file next to it is enough.
 
 The message itself comes from
 [`src/substack_post/templates/notify_message.md`](src/substack_post/templates/notify_message.md),
