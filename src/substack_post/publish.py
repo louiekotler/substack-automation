@@ -43,12 +43,18 @@ def whoami(api: Api) -> dict:
 
 
 def upload_photos(
-    api: Api, photos: list[Photo], workdir: Path
+    api: Api, photos: list[Photo], workdir: Path, on_photo=None
 ) -> list[tuple[Photo, str]]:
-    """Upload each photo and return it paired with its hosted CDN URL."""
+    """Upload each photo and return it paired with its hosted CDN URL.
+
+    `on_photo` is called with each photo before it goes up, for a caller
+    tracking how far along the upload is.
+    """
     results = []
     total = len(photos)
     for index, photo in enumerate(photos, start=1):
+        if on_photo:
+            on_photo(photo)
         print(f"  [{index}/{total}] uploading {photo.name}...", file=sys.stderr)
         upload_path = prepare_for_upload(photo, workdir)
         try:

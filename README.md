@@ -125,6 +125,7 @@ because publishing can't be undone. `--yes` skips the prompt.
 | `--yes` | Skip the confirmation prompt before publishing. |
 | `--notify` | After publishing, text everyone in the contacts file via macOS Messages. Requires `--publish`. |
 | `--notify-list` | Path to the notify contacts JSON file. See [Notify contacts on publish](#notify-contacts-on-publish) for where it's looked for by default. |
+| `--progress-file` | File to keep the current position in, for a caller that can't read stderr as it happens — see [Watching a run from another program](#watching-a-run-from-another-program). |
 | `--check` | Sign in, report the publication, and exit without posting. `photo_dir` and `--title` aren't needed. |
 | `--format` | `text` (default), `kv`, or `json` — see [Machine-readable output](#machine-readable-output). |
 
@@ -160,6 +161,34 @@ notified_failed=0
 `status` is `draft`, `published`, `dry_run`, or `aborted`. Every key is always
 present, so a caller never has to branch on which fields exist. Booleans are
 `1`/`0` and unknown values are empty.
+
+### Watching a run from another program
+
+`--format kv` says what happened; it says nothing while it is happening, because
+a caller only sees the output once the process has exited. `--progress-file`
+fills that gap:
+
+```bash
+$ substack-post ./photos --title "Olympic Peninsula" --publish --notify \
+    --yes --format kv --progress-file /tmp/position
+$ cat /tmp/position          # while it runs
+step=4
+total=19
+label=Uploading IMG_0403.HEIC
+```
+
+The file is overwritten at each step — it is a position, not a log — so a
+caller polls it and reads whatever is there. A run's steps are signing in, one
+per photo, creating the draft, publishing if asked, and one per contact texted;
+`total` is fixed for the run, and `label` is meant to be shown as it is. A
+half-written read simply doesn't parse, and the next poll picks it up.
+
+Uploading is not the whole wait. Publishing and texting take seconds each with
+nothing to show for them, which is exactly the stretch that looks like the tool
+has stopped — hence steps rather than photos.
+
+Writing the file is a courtesy: if it can't be written, the post still goes
+ahead. Nothing deletes it, so the caller that named it owns it.
 
 The `kv` form exists for callers without a JSON parser — it's what the companion
 Lightroom plug-in (`lightroom-substack-publisher`) uses, which keeps a

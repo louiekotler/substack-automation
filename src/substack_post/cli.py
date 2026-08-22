@@ -12,6 +12,7 @@ from . import notify, publish, render
 from .config import ConfigError, load_credentials, resolve_notify_contacts_path
 from .notify import NotifyError
 from .photos import PhotoError, collect
+from .progress import Progress
 from .render import DEFAULT_CAPTION_FORMAT
 from .publish import PublishError
 
@@ -99,6 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
         "NOTIFY_CONTACTS_FILE from .env, or notify_contacts.json).",
     )
     parser.add_argument(
+        "--progress-file",
+        type=Path,
+        default=None,
+        help="File to keep the current position in, for a caller that cannot "
+        "read stderr as it happens (see the README).",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="Sign in, report the publication, and exit without posting.",
@@ -143,6 +151,20 @@ def _result(status: str, *, url: str = "", draft_id=None, slug: str = "",
         "notified_ok": notified_ok,
         "notified_failed": notified_failed,
     }
+
+
+def _total_steps(args, photos: list, contacts: list | None) -> int:
+    """How many steps a run will take, for the position file to count against.
+
+    Signing in, one per photo, and the draft always happen; publishing and each
+    text only when asked for.
+    """
+    steps = 1 + len(photos) + 1
+    if args.publish:
+        steps += 1
+    if contacts:
+        steps += len(contacts)
+    return steps
 
 
 def _check(env_file: Path | None, fmt: str) -> int:
@@ -296,7 +318,10 @@ def run(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
 
+    progress = Progress(args.progress_file, _total_steps(args, photos, notify_contacts))
+
     try:
+        progress.step("Signing in to Substack")
         print("Signing in to Substack...", file=sys.stderr)
         api = publish.login(
             credentials.email, credentials.password, credentials.publication_url
@@ -304,12 +329,16 @@ def run(argv: list[str] | None = None) -> int:
 
         print("Uploading photos...", file=sys.stderr)
         with tempfile.TemporaryDirectory(prefix="substack-post-") as tmp:
-            photo_urls = publish.upload_photos(api, photos, Path(tmp))
+            photo_urls = publish.upload_photos(
+                api, photos, Path(tmp),
+                on_photo=lambda photo: progress.step(f"Uploading {photo.name}"),
+            )
 
         rendered = render.render_post(
             template, photo_urls, args.caption_format, signoff
         )
 
+        progress.step("Creating the draft")
         print("Creating draft...", file=sys.stderr)
         draft = publish.create_draft(api, args.title, args.subtitle, rendered)
         draft_id = draft.get("id")
@@ -350,6 +379,7 @@ def run(argv: list[str] | None = None) -> int:
                     print(url)
                 return 1
 
+            progress.step("Publishing" + (" and emailing subscribers" if send else ""))
             print("Publishing...", file=sys.stderr)
             published = publish.publish_draft(api, draft_id, send=send)
             slug = publish.published_slug(api, draft_id, published)
@@ -364,7 +394,10 @@ def run(argv: list[str] | None = None) -> int:
                 notify_messages = _notify_messages(notify_contacts, args.title, url)
                 # Fail-soft: a bad number shouldn't hide that the post itself
                 # published successfully, so failures are reported, not fatal.
-                for contact, error in notify.notify_all(notify_messages):
+                for contact, error in notify.notify_all(
+                    notify_messages,
+                    on_send=lambda contact: progress.step(f"Texting {contact.name}"),
+                ):
                     if error is None:
                         notified_ok += 1
                         line = f"  ok {contact.name}"

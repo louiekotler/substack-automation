@@ -140,17 +140,29 @@ def contacts_file(tmp_path):
     return path
 
 
+class _Record:
+    """What a stubbed run did: the texts it sent, and the positions it passed."""
+
+    def __init__(self):
+        self.sent = []
+        self.steps = []
+
+
 @pytest.fixture
 def fake_substack(monkeypatch):
-    """Stub out Substack and Messages, and collect the texts that would go out.
+    """Stub out Substack and Messages, and watch what a run does.
 
     Returns a setup callable taking the publish response and the post as it
-    would read back afterwards; the list it returns fills with (contact,
-    message) pairs.
+    would read back afterwards. Given a progress file, the stubs read it back
+    at each step, which is the only way to see a position that is overwritten
+    rather than accumulated.
     """
-    sent = []
+    record = _Record()
 
-    def setup(publish_response, post=None):
+    def setup(publish_response, post=None, progress_file=None):
+        def note():
+            if progress_file is not None and progress_file.exists():
+                record.steps.append(progress_file.read_text())
         monkeypatch.setattr(
             cli,
             "load_credentials",
@@ -159,25 +171,40 @@ def fake_substack(monkeypatch):
             ),
         )
         monkeypatch.setattr(publish, "login", lambda *args: _Api(post or {}))
-        monkeypatch.setattr(
-            publish,
-            "upload_photos",
-            lambda api, photos, workdir: [
-                (photo, f"https://cdn.test/{photo.name}") for photo in photos
-            ],
-        )
-        monkeypatch.setattr(publish, "create_draft", lambda *args: {"id": 42})
-        monkeypatch.setattr(
-            publish, "publish_draft", lambda api, draft_id, send: publish_response
-        )
+        def upload_photos(api, photos, workdir, on_photo=None):
+            uploaded = []
+            for photo in photos:
+                if on_photo:
+                    on_photo(photo)
+                note()
+                uploaded.append((photo, f"https://cdn.test/{photo.name}"))
+            return uploaded
+
+        monkeypatch.setattr(publish, "upload_photos", upload_photos)
+        def create_draft(*args):
+            note()
+            return {"id": 42}
+
+        def publish_draft(api, draft_id, send):
+            note()
+            return publish_response
+
+        monkeypatch.setattr(publish, "create_draft", create_draft)
+        monkeypatch.setattr(publish, "publish_draft", publish_draft)
         monkeypatch.setattr(notify, "check_platform", lambda: None)
 
-        def notify_all(messages):
-            sent.extend(messages)
-            return [(contact, None) for contact, _ in messages]
+        def notify_all(messages, on_send=None):
+            results = []
+            for contact, message in messages:
+                if on_send:
+                    on_send(contact)
+                note()
+                record.sent.append((contact, message))
+                results.append((contact, None))
+            return results
 
         monkeypatch.setattr(notify, "notify_all", notify_all)
-        return sent
+        return record
 
     return setup
 
@@ -192,7 +219,7 @@ def _publish_argv(photo_dir, contacts_file):
 def test_notify_links_to_the_slug_publishing_reported(
     photo_dir, contacts_file, fake_substack, capsys
 ) -> None:
-    sent = fake_substack({"slug": "olympic-peninsula"})
+    sent = fake_substack({"slug": "olympic-peninsula"}).sent
     assert run(_publish_argv(photo_dir, contacts_file)) == 0
     [(contact, message)] = sent
     assert contact.name == "Mom"
@@ -206,7 +233,7 @@ def test_notify_links_to_the_slug_publishing_reported(
 def test_notify_reads_the_slug_back_when_publishing_omits_it(
     photo_dir, contacts_file, fake_substack
 ) -> None:
-    sent = fake_substack({}, post={"slug": "olympic-peninsula"})
+    sent = fake_substack({}, post={"slug": "olympic-peninsula"}).sent
     assert run(_publish_argv(photo_dir, contacts_file)) == 0
     assert "https://x.test/p/olympic-peninsula" in sent[0][1]
 
@@ -214,7 +241,7 @@ def test_notify_reads_the_slug_back_when_publishing_omits_it(
 def test_no_slug_anywhere_errors_instead_of_texting_a_dead_link(
     photo_dir, contacts_file, fake_substack, capsys
 ) -> None:
-    sent = fake_substack({}, post={})
+    sent = fake_substack({}, post={}).sent
     assert run(_publish_argv(photo_dir, contacts_file)) == 1
     assert sent == []
     captured = capsys.readouterr()
@@ -225,7 +252,7 @@ def test_no_slug_anywhere_errors_instead_of_texting_a_dead_link(
 def test_confirmation_previews_the_link_the_post_will_get(
     photo_dir, contacts_file, fake_substack, monkeypatch, capsys
 ) -> None:
-    sent = fake_substack({"slug": "olympic-peninsula"})
+    sent = fake_substack({"slug": "olympic-peninsula"}).sent
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *args: "n")
     argv = [a for a in _publish_argv(photo_dir, contacts_file)
@@ -236,3 +263,51 @@ def test_confirmation_previews_the_link_the_post_will_get(
     out = capsys.readouterr().out
     assert "https://x.test/p/olympic-peninsula" in out
     assert "/p/None" not in out
+
+
+def _positions(steps):
+    """Each recorded position as (step, total, label)."""
+    read = [dict(line.split("=", 1) for line in text.splitlines()) for text in steps]
+    return [(int(p["step"]), int(p["total"]), p["label"]) for p in read]
+
+
+def test_the_position_advances_through_the_whole_run(
+    photo_dir, contacts_file, fake_substack, tmp_path
+) -> None:
+    position = tmp_path / "position"
+    record = fake_substack({"slug": "olympic-peninsula"}, progress_file=position)
+
+    argv = _publish_argv(photo_dir, contacts_file) + ["--progress-file", str(position)]
+    assert run(argv) == 0
+
+    # Signing in, two photos, the draft, publishing, one contact.
+    steps = _positions(record.steps)
+    assert [total for _, total, _ in steps] == [6] * 5
+    assert [step for step, _, _ in steps] == [2, 3, 4, 5, 6]
+    assert [label for _, _, label in steps] == [
+        "Uploading a.jpg",
+        "Uploading b.jpg",
+        "Creating the draft",
+        "Publishing and emailing subscribers",
+        "Texting Mom",
+    ]
+    # The gap this exists to close: the position keeps moving after the last
+    # photo is up, through the part of the run with nothing else to show.
+    assert _positions([position.read_text()]) == [(6, 6, "Texting Mom")]
+
+
+def test_a_draft_run_counts_only_the_steps_it_takes(
+    photo_dir, fake_substack, tmp_path
+) -> None:
+    position = tmp_path / "position"
+    fake_substack({}, progress_file=position)
+    assert run([str(photo_dir), "--title", "T", "--progress-file", str(position),
+                "--format", "kv"]) == 0
+    # Signing in, two photos, the draft — no publishing, nobody texted.
+    assert _positions([position.read_text()]) == [(4, 4, "Creating the draft")]
+
+
+def test_no_progress_file_writes_nothing(photo_dir, fake_substack, tmp_path) -> None:
+    fake_substack({})
+    assert run([str(photo_dir), "--title", "T", "--format", "kv"]) == 0
+    assert list(tmp_path.iterdir()) == [photo_dir]

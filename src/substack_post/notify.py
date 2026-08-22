@@ -137,14 +137,17 @@ def send_to_group(chat_name: str, message: str) -> None:
 
 
 def notify_all(
-    messages: list[tuple[Contact, str]],
+    messages: list[tuple[Contact, str]], on_send=None
 ) -> list[tuple[Contact, str | None]]:
     """Text each (contact, personalized message) pair independently.
 
-    One bad number/chat name doesn't stop the rest.
+    One bad number/chat name doesn't stop the rest. `on_send` is called with
+    each contact before texting them, for a caller tracking progress.
     """
     results = []
     for contact, message in messages:
+        if on_send:
+            on_send(contact)
         try:
             if contact.is_group:
                 send_to_group(contact.chat_name, message)
