@@ -267,6 +267,12 @@ showing who will be texted and an example of the personalized message, so you
 see it before it goes out — `--yes` skips this the same way it skips the rest
 of the prompt.
 
+`{{link}}` is the post's address, which Substack derives from the title and
+assigns only when the post goes live. The texts are rendered from the address
+it reports back, so the link is always real; the confirmation prompt shows the
+address the title is expected to produce, which is the same one in all but
+unusual cases (a title that collides with an existing post, say).
+
 > [!IMPORTANT]
 > The first time you run `--notify`, macOS will prompt you to grant your
 > terminal app **Automation** permission to control Messages — approve it, or

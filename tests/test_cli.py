@@ -9,7 +9,9 @@ import json
 import pytest
 from PIL import Image
 
+from substack_post import cli, notify, publish
 from substack_post.cli import _emit, _result, build_parser, run
+from substack_post.config import Credentials
 
 
 def _jpeg(path, size=(8, 8)) -> None:
@@ -119,3 +121,118 @@ def test_named_env_file_that_is_missing_says_so(photo_dir, tmp_path, capsys) -> 
     code = run([str(photo_dir), "--title", "T", "--env-file", str(tmp_path / "nope.env")])
     assert code == 2
     assert "No such env file" in capsys.readouterr().err
+
+
+class _Api:
+    """Stands in for python-substack's Api; only the slug lookup is reached."""
+
+    def __init__(self, draft):
+        self._draft = draft
+
+    def get_draft(self, draft_id):
+        return self._draft
+
+
+@pytest.fixture
+def contacts_file(tmp_path):
+    path = tmp_path / "contacts.json"
+    path.write_text(json.dumps([{"name": "Mom", "phone": "+15551234567"}]))
+    return path
+
+
+@pytest.fixture
+def fake_substack(monkeypatch):
+    """Stub out Substack and Messages, and collect the texts that would go out.
+
+    Returns a setup callable taking the publish response and the post as it
+    would read back afterwards; the list it returns fills with (contact,
+    message) pairs.
+    """
+    sent = []
+
+    def setup(publish_response, post=None):
+        monkeypatch.setattr(
+            cli,
+            "load_credentials",
+            lambda env_file=None: Credentials(
+                email="e@x.test", password="p", publication_url="https://x.test"
+            ),
+        )
+        monkeypatch.setattr(publish, "login", lambda *args: _Api(post or {}))
+        monkeypatch.setattr(
+            publish,
+            "upload_photos",
+            lambda api, photos, workdir: [
+                (photo, f"https://cdn.test/{photo.name}") for photo in photos
+            ],
+        )
+        monkeypatch.setattr(publish, "create_draft", lambda *args: {"id": 42})
+        monkeypatch.setattr(
+            publish, "publish_draft", lambda api, draft_id, send: publish_response
+        )
+        monkeypatch.setattr(notify, "check_platform", lambda: None)
+
+        def notify_all(messages):
+            sent.extend(messages)
+            return [(contact, None) for contact, _ in messages]
+
+        monkeypatch.setattr(notify, "notify_all", notify_all)
+        return sent
+
+    return setup
+
+
+def _publish_argv(photo_dir, contacts_file):
+    return [
+        str(photo_dir), "--title", "Olympic Peninsula", "--publish", "--notify",
+        "--notify-list", str(contacts_file), "--yes", "--format", "kv",
+    ]
+
+
+def test_notify_links_to_the_slug_publishing_reported(
+    photo_dir, contacts_file, fake_substack, capsys
+) -> None:
+    sent = fake_substack({"slug": "olympic-peninsula"})
+    assert run(_publish_argv(photo_dir, contacts_file)) == 0
+    [(contact, message)] = sent
+    assert contact.name == "Mom"
+    assert "https://x.test/p/olympic-peninsula" in message
+    result = dict(l.split("=", 1) for l in capsys.readouterr().out.splitlines())
+    assert result["url"] == "https://x.test/p/olympic-peninsula"
+    assert result["slug"] == "olympic-peninsula"
+    assert result["notified_ok"] == "1"
+
+
+def test_notify_reads_the_slug_back_when_publishing_omits_it(
+    photo_dir, contacts_file, fake_substack
+) -> None:
+    sent = fake_substack({}, post={"slug": "olympic-peninsula"})
+    assert run(_publish_argv(photo_dir, contacts_file)) == 0
+    assert "https://x.test/p/olympic-peninsula" in sent[0][1]
+
+
+def test_no_slug_anywhere_errors_instead_of_texting_a_dead_link(
+    photo_dir, contacts_file, fake_substack, capsys
+) -> None:
+    sent = fake_substack({}, post={})
+    assert run(_publish_argv(photo_dir, contacts_file)) == 1
+    assert sent == []
+    captured = capsys.readouterr()
+    assert "error: " in captured.err
+    assert "/p/None" not in captured.err + captured.out
+
+
+def test_confirmation_previews_the_link_the_post_will_get(
+    photo_dir, contacts_file, fake_substack, monkeypatch, capsys
+) -> None:
+    sent = fake_substack({"slug": "olympic-peninsula"})
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *args: "n")
+    argv = [a for a in _publish_argv(photo_dir, contacts_file)
+            if a not in ("--yes", "--format", "kv")]
+
+    assert run(argv) == 1
+    assert sent == []
+    out = capsys.readouterr().out
+    assert "https://x.test/p/olympic-peninsula" in out
+    assert "/p/None" not in out

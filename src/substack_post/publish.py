@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -78,6 +79,38 @@ def publish_draft(api: Api, draft_id: int, send: bool) -> dict:
         raise PublishError(f"Failed to publish draft {draft_id}: {exc}") from exc
 
 
+def published_slug(api: Api, draft_id: int, published: dict) -> str:
+    """The live post's slug, which exists only once the post is published.
+
+    Creating a draft returns a null slug — Substack derives one from the title
+    at publish time — so it has to come from the publish response, or from the
+    post itself if that response leaves it out.
+    """
+    slug = (published or {}).get("slug")
+    if slug:
+        return slug
+    try:
+        slug = (api.get_draft(draft_id) or {}).get("slug")
+    except Exception:  # noqa: BLE001 - the post is live either way; this is a lookup
+        slug = None
+    if not slug:
+        raise PublishError(
+            f"Post {draft_id} is published, but Substack did not report its "
+            "slug, so the address to link to is unknown."
+        )
+    return slug
+
+
+def expected_slug(title: str) -> str:
+    """Approximate the slug Substack derives from a title.
+
+    Good enough to show someone what a link will look like before the post
+    exists; the real slug always comes back from Substack.
+    """
+    stripped = re.sub(r"['\u2019]", "", title.lower())
+    return re.sub(r"[^a-z0-9]+", "-", stripped).strip("-")
+
+
 def site_base_url(configured_publication_url: str) -> str:
     return configured_publication_url.rstrip("/")
 
@@ -87,4 +120,14 @@ def draft_url(base: str, draft_id: int) -> str:
 
 
 def post_url(base: str, slug: str) -> str:
+    # A missing slug must never be interpolated as it comes: that turns into a
+    # link to /p/None that looks real enough to send to people.
+    if not slug:
+        raise PublishError("Cannot build a post address without a slug.")
     return f"{site_base_url(base)}/p/{slug}"
+
+
+def preview_post_url(base: str, title: str) -> str:
+    """The address the post will most likely get, for showing before it exists."""
+    slug = expected_slug(title)
+    return post_url(base, slug) if slug else site_base_url(base)

@@ -176,6 +176,22 @@ def _check(env_file: Path | None, fmt: str) -> int:
     return 0
 
 
+def _notify_messages(
+    contacts: list[notify.Contact], title: str, link: str
+) -> list[tuple[notify.Contact, str]]:
+    """Pair each contact with their personalized text about the post."""
+    template = render.default_notify_message_template()
+    return [
+        (
+            contact,
+            notify.render_message(
+                template, title=title, link=link, name=contact.name
+            ),
+        )
+        for contact in contacts
+    ]
+
+
 def _confirm_publish(
     *,
     title: str,
@@ -297,38 +313,37 @@ def run(argv: list[str] | None = None) -> int:
         print("Creating draft...", file=sys.stderr)
         draft = publish.create_draft(api, args.title, args.subtitle, rendered)
         draft_id = draft.get("id")
-        slug = draft.get("slug")
+        # A draft has no slug of its own; Substack derives one from the title
+        # when the post goes live, so there is no address to link to yet.
+        slug = ""
 
         if args.publish:
             send = not args.no_email
 
-            notify_messages = None
+            notify_preview = None
             if args.notify:
-                link = publish.post_url(credentials.publication_url, slug)
-                notify_template = render.default_notify_message_template()
-                notify_messages = [
-                    (
-                        contact,
-                        notify.render_message(
-                            notify_template, title=args.title, link=link, name=contact.name
-                        ),
-                    )
-                    for contact in notify_contacts
-                ]
+                # The post does not exist yet, so the preview shows the address
+                # it will most likely get. What actually gets sent is rendered
+                # afterwards, from the slug Substack reports.
+                notify_preview = _notify_messages(
+                    notify_contacts,
+                    args.title,
+                    publish.preview_post_url(credentials.publication_url, args.title),
+                )
 
             if not args.yes and not _confirm_publish(
                 title=args.title,
                 photo_count=len(photos),
                 publication_url=credentials.publication_url,
                 send=send,
-                notify_messages=notify_messages,
+                notify_messages=notify_preview,
             ):
                 url = publish.draft_url(credentials.publication_url, draft_id)
                 print("Aborted. Draft was created but not published:", file=sys.stderr)
                 if machine:
                     _emit(
                         _result("aborted", url=url, draft_id=draft_id,
-                                slug=slug or "", photos=len(photos)),
+                                slug=slug, photos=len(photos)),
                         args.format,
                     )
                 else:
@@ -336,7 +351,8 @@ def run(argv: list[str] | None = None) -> int:
                 return 1
 
             print("Publishing...", file=sys.stderr)
-            publish.publish_draft(api, draft_id, send=send)
+            published = publish.publish_draft(api, draft_id, send=send)
+            slug = publish.published_slug(api, draft_id, published)
             url = publish.post_url(credentials.publication_url, slug)
             if not machine:
                 print("Published:")
@@ -345,6 +361,7 @@ def run(argv: list[str] | None = None) -> int:
             notified_ok = notified_failed = 0
             if args.notify:
                 print("Notifying...", file=sys.stderr)
+                notify_messages = _notify_messages(notify_contacts, args.title, url)
                 # Fail-soft: a bad number shouldn't hide that the post itself
                 # published successfully, so failures are reported, not fatal.
                 for contact, error in notify.notify_all(notify_messages):
@@ -360,7 +377,7 @@ def run(argv: list[str] | None = None) -> int:
 
             if machine:
                 _emit(
-                    _result("published", url=url, draft_id=draft_id, slug=slug or "",
+                    _result("published", url=url, draft_id=draft_id, slug=slug,
                             photos=len(photos), emailed=send,
                             notified_ok=notified_ok, notified_failed=notified_failed),
                     args.format,
@@ -369,7 +386,7 @@ def run(argv: list[str] | None = None) -> int:
             url = publish.draft_url(credentials.publication_url, draft_id)
             if machine:
                 _emit(
-                    _result("draft", url=url, draft_id=draft_id, slug=slug or "",
+                    _result("draft", url=url, draft_id=draft_id, slug=slug,
                             photos=len(photos)),
                     args.format,
                 )
