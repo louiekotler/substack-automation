@@ -6,9 +6,11 @@ import argparse
 import json
 import sys
 import tempfile
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import notify, publish, render
+from . import launchd, notify, publish, render, scheduled
 from .config import ConfigError, load_credentials, resolve_notify_contacts_path
 from .notify import NotifyError
 from .photos import PhotoError, collect
@@ -47,11 +49,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create a draft only. This is the default; the flag exists for clarity.",
     )
+    mode.add_argument(
+        "--schedule",
+        metavar="WHEN",
+        default=None,
+        help="Publish at a later time, e.g. 2026-10-28T08:00 (local time unless "
+        "it names an offset). Substack publishes and emails on its own; "
+        "--notify texts go from this Mac.",
+    )
 
     parser.add_argument(
         "--no-email",
         action="store_true",
-        help="With --publish, post to the site without emailing subscribers.",
+        help="With --publish or --schedule, post to the site without emailing "
+        "subscribers.",
     )
     parser.add_argument(
         "--signoff",
@@ -89,8 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--notify",
         action="store_true",
-        help="After publishing, text everyone in the contacts file via macOS "
-        "Messages that the post is live. Requires --publish.",
+        help="Once the post is live, text everyone in the contacts file via "
+        "macOS Messages. Requires --publish or --schedule.",
     )
     parser.add_argument(
         "--notify-list",
@@ -139,8 +150,15 @@ def _emit(payload: dict, fmt: str) -> None:
 
 def _result(status: str, *, url: str = "", draft_id=None, slug: str = "",
             photos: int = 0, emailed: bool = False,
-            notified_ok: int = 0, notified_failed: int = 0) -> dict:
-    """One shape for every outcome, so a caller can parse without branching."""
+            notified_ok: int = 0, notified_failed: int = 0,
+            scheduled_for: str = "", messages_check: str = "") -> dict:
+    """One shape for every outcome, so a caller can parse without branching.
+
+    For a scheduled post, `emailed` says whether subscribers *will* be emailed,
+    and `messages_check` whether the job that will text contacts can reach
+    Messages: "ok", "failed: <why>", "pending" (not answered yet), or empty
+    when nobody is to be texted.
+    """
     return {
         "status": status,
         "url": url,
@@ -150,7 +168,45 @@ def _result(status: str, *, url: str = "", draft_id=None, slug: str = "",
         "emailed": emailed,
         "notified_ok": notified_ok,
         "notified_failed": notified_failed,
+        "scheduled_for": scheduled_for,
+        "messages_check": messages_check,
     }
+
+
+# Long enough to upload a post and still be ahead of its time.
+MIN_SCHEDULE_LEAD = timedelta(minutes=2)
+# Checked again once the photos are up: a time that has passed by then would
+# have Substack publish straight away, which is not what was asked for.
+MIN_LEAD_AT_SCHEDULING = timedelta(seconds=30)
+# How long to wait for the texting job to prove it can reach Messages. The
+# first time, that is a permission prompt someone has to answer.
+MESSAGES_CHECK_WAIT = 90
+
+
+def parse_when(value: str, now: datetime | None = None) -> datetime:
+    """A --schedule time as an aware datetime. Naive times are local time, with
+    the offset that applies on that date, not today's."""
+    try:
+        when = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise ValueError(
+            f"Cannot read the time {value!r}. Use e.g. 2026-10-28T08:00."
+        ) from None
+    when = when.astimezone() if when.tzinfo is None else when
+    now = now or datetime.now().astimezone()
+    if when < now + MIN_SCHEDULE_LEAD:
+        raise ValueError(f"{when:%Y-%m-%d %H:%M} is too soon to schedule.")
+    return when
+
+
+def _wait_for_messages_check(job: scheduled.Job) -> str:
+    deadline = time.monotonic() + MESSAGES_CHECK_WAIT
+    while time.monotonic() < deadline:
+        result = scheduled.messages_check(job)
+        if result is not None:
+            return result
+        time.sleep(0.5)
+    return "pending"
 
 
 def _total_steps(args, photos: list, contacts: list | None) -> int:
@@ -162,8 +218,12 @@ def _total_steps(args, photos: list, contacts: list | None) -> int:
     steps = 1 + len(photos) + 1
     if args.publish:
         steps += 1
-    if contacts:
-        steps += len(contacts)
+        if contacts:
+            steps += len(contacts)
+    elif args.schedule:
+        # The email option, then scheduling; the texts come later, from the
+        # job, so setting that up is the one step they cost now.
+        steps += 2 + (1 if contacts else 0)
     return steps
 
 
@@ -198,22 +258,6 @@ def _check(env_file: Path | None, fmt: str) -> int:
     return 0
 
 
-def _notify_messages(
-    contacts: list[notify.Contact], title: str, link: str
-) -> list[tuple[notify.Contact, str]]:
-    """Pair each contact with their personalized text about the post."""
-    template = render.default_notify_message_template()
-    return [
-        (
-            contact,
-            notify.render_message(
-                template, title=title, link=link, name=contact.name
-            ),
-        )
-        for contact in contacts
-    ]
-
-
 def _confirm_publish(
     *,
     title: str,
@@ -221,10 +265,13 @@ def _confirm_publish(
     publication_url: str,
     send: bool,
     notify_messages: list[tuple[notify.Contact, str]] | None = None,
+    when: datetime | None = None,
 ) -> bool:
     print()
-    print("About to publish:")
+    print("About to schedule:" if when else "About to publish:")
     print(f"  Title:       {title}")
+    if when:
+        print(f"  Goes live:   {when.astimezone():%a %b %-d, %Y at %-I:%M %p %Z}")
     print(f"  Photos:      {photo_count}")
     print(f"  Publication: {publication_url}")
     print(f"  Email:       {'yes, all subscribers' if send else 'no (web only)'}")
@@ -238,12 +285,12 @@ def _confirm_publish(
     print()
     if not sys.stdin.isatty():
         print(
-            "error: refusing to publish without confirmation in a non-interactive "
-            "session; pass --yes.",
+            "error: refusing to publish or schedule without confirmation in a "
+            "non-interactive session; pass --yes.",
             file=sys.stderr,
         )
         return False
-    response = input("Publish? [y/N] ").strip().lower()
+    response = input(("Schedule" if when else "Publish") + "? [y/N] ").strip().lower()
     return response == "y"
 
 
@@ -259,8 +306,16 @@ def run(argv: list[str] | None = None) -> int:
         parser.error("the following arguments are required: photo_dir")
     if args.title is None:
         parser.error("the following arguments are required: --title")
-    if args.notify and not args.publish:
-        parser.error("--notify requires --publish.")
+    if args.notify and not (args.publish or args.schedule):
+        parser.error("--notify requires --publish or --schedule.")
+
+    when = None
+    if args.schedule:
+        try:
+            when = parse_when(args.schedule)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     try:
         photos = collect(args.photo_dir)
@@ -318,6 +373,16 @@ def run(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
 
+    # The texting job runs later and somewhere else, so it needs to find the
+    # credentials by itself: from a file, not from this process's environment.
+    env_path = args.env_file if args.env_file is not None else Path(".env")
+    if when and args.notify and not env_path.expanduser().is_file():
+        print(
+            "error: --schedule with --notify needs --env-file.",
+            file=sys.stderr,
+        )
+        return 2
+
     progress = Progress(args.progress_file, _total_steps(args, photos, notify_contacts))
 
     try:
@@ -346,6 +411,13 @@ def run(argv: list[str] | None = None) -> int:
         # when the post goes live, so there is no address to link to yet.
         slug = ""
 
+        if when:
+            return _schedule(
+                args, api, credentials, draft_id, when, len(photos),
+                notify_contacts, contacts_path if args.notify else None,
+                env_path, progress, machine,
+            )
+
         if args.publish:
             send = not args.no_email
 
@@ -354,7 +426,7 @@ def run(argv: list[str] | None = None) -> int:
                 # The post does not exist yet, so the preview shows the address
                 # it will most likely get. What actually gets sent is rendered
                 # afterwards, from the slug Substack reports.
-                notify_preview = _notify_messages(
+                notify_preview = notify.compose(
                     notify_contacts,
                     args.title,
                     publish.preview_post_url(credentials.publication_url, args.title),
@@ -391,7 +463,7 @@ def run(argv: list[str] | None = None) -> int:
             notified_ok = notified_failed = 0
             if args.notify:
                 print("Notifying...", file=sys.stderr)
-                notify_messages = _notify_messages(notify_contacts, args.title, url)
+                notify_messages = notify.compose(notify_contacts, args.title, url)
                 # Fail-soft: a bad number shouldn't hide that the post itself
                 # published successfully, so failures are reported, not fatal.
                 for contact, error in notify.notify_all(
@@ -431,6 +503,84 @@ def run(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    return 0
+
+
+def _schedule(args, api, credentials, draft_id, when, photo_count,
+              notify_contacts, contacts_path, env_path, progress, machine) -> int:
+    """Schedule an already-created draft, and arrange its texts if asked.
+
+    Called inside run()'s PublishError handler. Order matters: the email
+    option is set and confirmed first, since scheduling cannot carry it, and
+    the texting job is in place before the post is scheduled, so there is
+    never a scheduled post whose texts silently won't go.
+    """
+    send = not args.no_email
+
+    if not args.yes and not _confirm_publish(
+        title=args.title,
+        photo_count=photo_count,
+        publication_url=credentials.publication_url,
+        send=send,
+        notify_messages=notify.compose(
+            notify_contacts, args.title,
+            publish.preview_post_url(credentials.publication_url, args.title),
+        ) if notify_contacts else None,
+        when=when,
+    ):
+        url = publish.draft_url(credentials.publication_url, draft_id)
+        print("Aborted. Draft was created but not scheduled:", file=sys.stderr)
+        if machine:
+            _emit(_result("aborted", url=url, draft_id=draft_id,
+                          photos=photo_count), args.format)
+        else:
+            print(url)
+        return 1
+
+    if when < datetime.now().astimezone() + MIN_LEAD_AT_SCHEDULING:
+        raise publish.PublishError(
+            f"{when:%H:%M} passed while uploading. Left as a draft: "
+            + publish.draft_url(credentials.publication_url, draft_id)
+        )
+
+    progress.step("Setting the email option")
+    publish.set_send_email(api, draft_id, send)
+
+    job = None
+    if notify_contacts:
+        progress.step("Arranging the texts")
+        try:
+            job = scheduled.arm(draft_id, when, env_path, contacts_path, args.title)
+        except launchd.LaunchdError as exc:
+            raise publish.PublishError(
+                f"Could not arrange the texts. Not scheduled: {exc}"
+            ) from exc
+
+    progress.step("Scheduling")
+    print("Scheduling...", file=sys.stderr)
+    try:
+        kept = publish.schedule(api, draft_id, when)
+    except publish.PublishError:
+        if job:
+            scheduled.disarm(job)
+        raise
+
+    # Substack gives the post its address when it is scheduled, not when it
+    # goes live.
+    slug = publish.post_state(api, draft_id).slug
+    url = publish.draft_url(credentials.publication_url, draft_id)
+    check = _wait_for_messages_check(job) if job else ""
+
+    if machine:
+        _emit(_result("scheduled", url=url, draft_id=draft_id, slug=slug,
+                      photos=photo_count, emailed=send,
+                      scheduled_for=kept.isoformat(), messages_check=check),
+              args.format)
+    else:
+        print(f"Scheduled for {kept.astimezone():%a %b %-d at %-I:%M %p}:")
+        print(url)
+        if job:
+            print(f"Texts: arranged (Messages check: {check})")
     return 0
 
 

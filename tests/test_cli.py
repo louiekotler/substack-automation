@@ -31,7 +31,7 @@ def test_result_has_every_key_whatever_the_outcome() -> None:
     keys = set(_result("draft")) | set(_result("published", url="u", emailed=True))
     assert keys == {
         "status", "url", "draft_id", "slug", "photos", "emailed",
-        "notified_ok", "notified_failed",
+        "notified_ok", "notified_failed", "scheduled_for", "messages_check",
     }
 
 
@@ -88,6 +88,7 @@ def test_dry_run_kv_reports_the_photo_count_and_nothing_else_on_stdout(
     assert dict(l.split("=", 1) for l in captured.out.splitlines()) == {
         "status": "dry_run", "url": "", "draft_id": "", "slug": "",
         "photos": "2", "emailed": "0", "notified_ok": "0", "notified_failed": "0",
+        "scheduled_for": "", "messages_check": "",
     }
     # The preview itself is still available, just out of the result's way.
     assert "dry run: rendered markdown" in captured.err
@@ -110,7 +111,7 @@ def test_unreadable_template_reports_an_error_line(photo_dir, tmp_path, capsys) 
     assert capsys.readouterr().err.startswith("error: ")
 
 
-def test_notify_still_requires_publish(photo_dir, capsys) -> None:
+def test_notify_still_requires_publish_or_schedule(photo_dir, capsys) -> None:
     with pytest.raises(SystemExit) as exit_info:
         run([str(photo_dir), "--title", "T", "--notify"])
     assert exit_info.value.code == 2

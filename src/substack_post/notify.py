@@ -13,6 +13,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import render
+
 
 class NotifyError(Exception):
     """Raised when contacts can't be loaded or a text can't be sent."""
@@ -98,6 +100,15 @@ def render_message(template: str, *, title: str, link: str, name: str) -> str:
     )
 
 
+def compose(contacts: list[Contact], title: str, link: str) -> list[tuple[Contact, str]]:
+    """Pair each contact with their personalized text about the post."""
+    template = render.default_notify_message_template()
+    return [
+        (contact, render_message(template, title=title, link=link, name=contact.name))
+        for contact in contacts
+    ]
+
+
 def _applescript_string(value: str) -> str:
     """Escape a value for embedding in a double-quoted AppleScript string literal."""
     return value.replace("\\", "\\\\").replace('"', '\\"')
@@ -134,6 +145,25 @@ def send_to_group(chat_name: str, message: str) -> None:
         "end tell"
     )
     _run_osascript(script)
+
+
+def check_messages() -> None:
+    """Prove Messages can be scripted from this process, without sending anything.
+
+    macOS asks permission per program the first time it scripts Messages, and
+    the answer belongs to whichever program asked. A check run from one place
+    says nothing about another, so this is run by the program that will send.
+    """
+    _run_osascript('tell application "Messages" to count chats')
+
+
+def alert_owner(title: str, message: str) -> None:
+    """Show a macOS notification. Best effort: there may be no one to see it."""
+    script = (
+        f'display notification "{_applescript_string(message)}" '
+        f'with title "{_applescript_string(title)}"'
+    )
+    subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
 def notify_all(

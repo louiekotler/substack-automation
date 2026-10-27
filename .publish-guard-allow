@@ -1,0 +1,3 @@
+# Strings publish-guard may flag here that are fine to publish.
+# A temporary path inside a test.
+home / "logs" / "x.log"

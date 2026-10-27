@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from substack import Api
@@ -137,3 +139,101 @@ def preview_post_url(base: str, title: str) -> str:
     """The address the post will most likely get, for showing before it exists."""
     slug = expected_slug(title)
     return post_url(base, slug) if slug else site_base_url(base)
+
+
+def set_send_email(api: Api, draft_id: int, send: bool) -> None:
+    """Choose whether the post emails subscribers when it goes live.
+
+    For a scheduled post this is the only place the choice is made: it is a
+    setting on the draft, and scheduling carries nothing but the time. So it is
+    read back rather than trusted, since a wrong value here emails everyone.
+    """
+    try:
+        api.put_draft(draft_id, should_send_email=send)
+        saved = (api.get_draft(draft_id) or {}).get("should_send_email")
+    except Exception as exc:  # noqa: BLE001
+        raise PublishError(f"Could not set the email option on draft {draft_id}: {exc}") from exc
+    if saved is not send:
+        raise PublishError(
+            f"Substack did not keep the email option on draft {draft_id}. "
+            "Not scheduled."
+        )
+
+
+def scheduled_for(api: Api, draft_id: int) -> datetime | None:
+    """When a draft is due to go live, or None if it is not scheduled.
+
+    A draft does not carry its own release time; only Substack's list of
+    scheduled posts does.
+    """
+    offset = 0
+    while True:
+        try:
+            page = api._session.get(
+                f"{api.publication_url}/post_management/scheduled",
+                params={"offset": offset, "limit": 25,
+                        "order_by": "trigger_at", "order_direction": "asc"},
+            )
+            page.raise_for_status()
+            listing = page.json()
+        except Exception as exc:  # noqa: BLE001
+            raise PublishError(f"Could not read the scheduled posts: {exc}") from exc
+        posts = listing.get("posts") or []
+        for post in posts:
+            if post.get("id") == draft_id and post.get("trigger_at"):
+                return _parse_time(post["trigger_at"])
+        offset += len(posts)
+        if not posts or offset >= (listing.get("total") or 0):
+            return None
+
+
+def schedule(api: Api, draft_id: int, when: datetime) -> datetime:
+    """Schedule a draft to go live at `when`, and return the time Substack kept."""
+    try:
+        api.prepublish_draft(draft_id)
+        api.schedule_draft(draft_id, when.astimezone(timezone.utc))
+    except Exception as exc:  # noqa: BLE001
+        raise PublishError(f"Failed to schedule draft {draft_id}: {exc}") from exc
+    kept = scheduled_for(api, draft_id)
+    if kept is None:
+        raise PublishError(
+            f"Substack accepted the schedule for draft {draft_id} but does not "
+            "list it as scheduled."
+        )
+    return kept
+
+
+@dataclass(frozen=True)
+class PostState:
+    """Where a post stands, for deciding what a scheduled job should do."""
+
+    state: str  # "published", "scheduled", "draft" or "gone"
+    title: str = ""
+    slug: str = ""
+    published_at: datetime | None = None
+    scheduled_for: datetime | None = None
+
+
+def post_state(api: Api, draft_id: int) -> PostState:
+    try:
+        draft = api.get_draft(draft_id) or {}
+    except Exception as exc:  # noqa: BLE001
+        # A deleted draft is a 404, which is an answer, not a failure.
+        if "404" in str(exc):
+            return PostState("gone")
+        raise PublishError(f"Could not read post {draft_id}: {exc}") from exc
+
+    title = draft.get("title") or draft.get("draft_title") or ""
+    slug = draft.get("slug") or ""
+    if draft.get("is_published"):
+        published_at = _parse_time(draft["post_date"]) if draft.get("post_date") else None
+        return PostState("published", title, slug, published_at=published_at)
+    when = scheduled_for(api, draft_id)
+    if when is not None:
+        return PostState("scheduled", title, slug, scheduled_for=when)
+    return PostState("draft", title, slug)
+
+
+def _parse_time(value: str) -> datetime:
+    """Substack's timestamps, e.g. 2026-10-28T05:12:00.000Z, as aware datetimes."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))

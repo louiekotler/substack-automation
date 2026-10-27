@@ -23,10 +23,11 @@ Built on [python-substack](https://github.com/ma2za/python-substack).
    captioned with the date it was taken (`August 3, 2026`).
 4. Fills in a simple markdown template (title/subtitle stay in Substack's own
    fields, not the body) and creates a draft.
-5. With `--publish`, publishes it. Otherwise it stops at a draft.
+5. With `--publish`, publishes it; with `--schedule`, has Substack publish it
+   at a later time. Otherwise it stops at a draft.
 6. Prints the resulting URL.
-7. Optionally (`--notify`, publish only), texts a personal contact list via
-   macOS Messages to let them know the post is up.
+7. Optionally (`--notify`), texts a contact list via macOS Messages
+   to let them know the post is up — when it goes live, for a scheduled post.
 
 ## Requirements
 
@@ -97,15 +98,22 @@ anything or contacting Substack:
 substack-post ./photos --title "Olympic Peninsula" --dry-run
 ```
 
+Schedule it for 8am tomorrow (local time), texting contacts when it goes
+live — see [Scheduling a post](#scheduling-a-post):
+
+```bash
+substack-post ./photos --title "Olympic Peninsula" --schedule 2026-10-28T08:00 --notify
+```
+
 Skip the interactive confirmation (e.g. for a scripted/cron use):
 
 ```bash
 substack-post ./photos --title "Olympic Peninsula" --publish --yes
 ```
 
-`--publish` always prints a summary (title, photo count, publication, whether
-subscribers will be emailed) and asks for confirmation before sending,
-because publishing can't be undone. `--yes` skips the prompt.
+`--publish` and `--schedule` always print a summary (title, photo count,
+publication, whether subscribers will be emailed, and when, for a schedule)
+and ask for confirmation first. `--yes` skips the prompt.
 
 ### All options
 
@@ -116,14 +124,15 @@ because publishing can't be undone. `--yes` skips the prompt.
 | `--subtitle` | Post subtitle (optional). |
 | `--publish` | Publish instead of leaving a draft. |
 | `--draft` | Create a draft only (the default; exists for clarity). |
-| `--no-email` | With `--publish`, don't email subscribers. |
+| `--schedule` | Publish at a later time instead, e.g. `2026-10-28T08:00` (local time unless it names an offset). See [Scheduling a post](#scheduling-a-post). |
+| `--no-email` | With `--publish` or `--schedule`, don't email subscribers. |
 | `--signoff` | Override the default sign-off text. |
 | `--caption-format` | strftime format for captions. Use `{day}` for a day number with no leading zero. Default: `%B {day}, %Y` → `August 3, 2026`. |
 | `--template` | Path to a custom markdown template, overriding the built-in one. |
 | `--env-file` | Path to a `.env` file (default: `.env` in the current directory). |
 | `--dry-run` | Render and print the post; no uploads, no Substack calls. |
 | `--yes` | Skip the confirmation prompt before publishing. |
-| `--notify` | After publishing, text everyone in the contacts file via macOS Messages. Requires `--publish`. |
+| `--notify` | Once the post is live, text everyone in the contacts file via macOS Messages. Requires `--publish` or `--schedule`. |
 | `--notify-list` | Path to the notify contacts JSON file. See [Notify contacts on publish](#notify-contacts-on-publish) for where it's looked for by default. |
 | `--progress-file` | File to keep the current position in, for a caller that can't read stderr as it happens — see [Watching a run from another program](#watching-a-run-from-another-program). |
 | `--check` | Sign in, report the publication, and exit without posting. `photo_dir` and `--title` aren't needed. |
@@ -156,9 +165,15 @@ photos=14
 emailed=0
 notified_ok=0
 notified_failed=0
+scheduled_for=
+messages_check=
 ```
 
-`status` is `draft`, `published`, `dry_run`, or `aborted`. Every key is always
+`status` is `draft`, `published`, `scheduled`, `dry_run`, or `aborted`. For a
+scheduled post, `scheduled_for` is when it goes live (ISO 8601 with offset),
+`emailed` says whether subscribers *will* be emailed, and `messages_check`
+whether the texts can be sent: `ok`, `failed: <why>`, or `pending` (see
+[Scheduling a post](#scheduling-a-post)). Every key is always
 present, so a caller never has to branch on which fields exist. Booleans are
 `1`/`0` and unknown values are empty.
 
@@ -179,7 +194,8 @@ label=Uploading IMG_0403.HEIC
 
 The file is overwritten at each step — it is a position, not a log — so a
 caller polls it and reads whatever is there. A run's steps are signing in, one
-per photo, creating the draft, publishing if asked, and one per contact texted;
+per photo, creating the draft, then publishing and one per contact texted, or
+for `--schedule`, setting the email option, arranging the texts, and scheduling;
 `total` is fixed for the run, and `label` is meant to be shown as it is. A
 half-written read simply doesn't parse, and the next poll picks it up.
 
@@ -197,6 +213,61 @@ third-party Lua JSON library out of that plug-in's bundle.
 On failure the tool exits non-zero and prints `error: <message>` to stderr.
 Exit codes: `1` if Substack rejected something, `2` for bad input or
 configuration, `130` if interrupted.
+
+## Scheduling a post
+
+`--schedule WHEN` uploads the photos and creates the draft now, then has
+Substack publish it at `WHEN`. Substack does the publishing and the subscriber
+email by itself, whether or not your computer is on. `WHEN` is ISO 8601; with
+no offset it's local time, using the offset in force on that date. It must be
+a few minutes away at least. Until then the post shows as *Scheduled* in
+Substack's dashboard, where it can be edited, moved, or cancelled.
+
+Whether subscribers get emailed is a setting on the draft, not part of the
+schedule, so the tool sets it (per `--no-email`) and reads it back before
+scheduling.
+
+### Texts for a scheduled post (macOS)
+
+Texts can only come from your Mac, and Messages has no way to schedule a text
+from a script. So `--schedule --notify` also installs a one-shot launchd job
+(macOS's own scheduler, so nothing keeps running in the meantime), which runs five minutes after the post's time and asks Substack where the
+post stands before doing anything:
+
+| At that point, the post is… | The job… |
+| --- | --- |
+| live | texts everyone, as `--publish --notify` would |
+| live for more than 24 hours (the Mac slept or was off through it) | sends nothing: a "new post" text that late helps nobody |
+| moved to a later time in Substack | waits for the new time |
+| due but not yet live | looks again in a couple of minutes, for up to 30 |
+| unscheduled or deleted | sends nothing |
+| unreachable (no network) | tries again every few minutes, for up to a day |
+
+Each outcome ends with a macOS notification saying what happened, and the job
+removes itself. It needs credentials it can read by itself later, so
+`--schedule --notify` requires them in a file (`--env-file`, or `.env` in the
+current directory).
+
+What it needs from the Mac, and what happens if it isn't there:
+
+- **Signed in and awake** at the post's time, for texts at that time.
+- **Asleep:** launchd runs the job when the Mac wakes.
+- **Off or logged out:** launchd doesn't catch up on those, so the job also
+  runs at each login, and goes ahead if its time has passed.
+- **Messages permission:** macOS asks once per program whether it may control
+  Messages, and the job runs as Python, not your terminal. The job checks
+  Messages (without sending) the moment it's installed, so a prompt appears
+  then, while you're there; the result is `messages_check` in the output.
+  A `pending` result means the prompt wasn't answered in time.
+
+Files it uses, all per user:
+
+- `~/Library/LaunchAgents/substack-post.notify.<draft id>.<time>.plist`
+- `~/Library/Application Support/substack-post/scheduled/<draft id>.json`
+- `~/Library/Logs/substack-post/notify-<draft id>.log` (kept afterwards)
+
+To cancel the texts, cancel the post in Substack; the job sees it and sends
+nothing.
 
 ## Ordering and captions
 
@@ -230,9 +301,11 @@ contain a `{{photos}}` placeholder to be useful.
 
 ## Notify contacts on publish
 
-With `--publish --notify`, once the post is live it texts a personal contact
+With `--publish --notify`, once the post is live it texts a contact
 list via the macOS Messages app, so you don't have to separately let people
-know. It only ever fires after an actual publish — never for a draft.
+know. It only ever fires once a post is actually live — never for a draft.
+For a scheduled post the texts go when it goes live; see
+[Scheduling a post](#scheduling-a-post).
 
 Create your contact list from the example:
 
@@ -297,7 +370,7 @@ see it before it goes out — `--yes` skips this the same way it skips the rest
 of the prompt.
 
 `{{link}}` is the post's address, which Substack derives from the title and
-assigns only when the post goes live. The texts are rendered from the address
+assigns only when the post goes live (or is scheduled). The texts are rendered from the address
 it reports back, so the link is always real; the confirmation prompt shows the
 address the title is expected to produce, which is the same one in all but
 unusual cases (a title that collides with an existing post, say).
